@@ -9,10 +9,6 @@ import org.jocl.*;
 
 import static org.jocl.CL.*;
 
-import java.io.BufferedOutputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
-
 public class BoardExpansion {
     private static final int BATCH_SIZE = 1_000_000;
 
@@ -44,68 +40,78 @@ public class BoardExpansion {
         loadResources();
         buildKernels();
 
-        Set<Long> seenHashes = new HashSet<>();
-        List<String> current = Collections.singletonList(
-                String.join("", Collections.nCopies(BOARD_SIZE, " "))
-        );
+        // Open lookup table for compressed boards
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter("gameTree.txt"))) {
+            Set<Long> seenHashes = new HashSet<>();
+            List<String> current = Collections.singletonList(
+                    String.join("", Collections.nCopies(BOARD_SIZE, " "))
+            );
 
-        for (int step = 0; step <= BOARD_SIZE; step++) {
-            BigInteger theoretical = perm(BigInteger.valueOf(27), step);
-            long start = System.currentTimeMillis();
+            for (int step = 0; step <= BOARD_SIZE; step++) {
+                BigInteger theoretical = perm(BigInteger.valueOf(27), step);
+                long start = System.currentTimeMillis();
 
-            if (step == 0) {
-                System.out.printf("%nStep %d: Theoretical = %s%n", step, theoretical);
-                System.out.printf("Generated = 1, Difference = %s, Time = 0 ms%n",
-                        theoretical.subtract(BigInteger.ONE));
-            } else {
-                // 1) canonicalize
-                List<String> canon = runCanonical(current);
-                // 2) hash
-                long[] hashes = runHash(canon);
-                // 3) dedupe
-                List<String> uniqueB = new ArrayList<>();
-                List<Long> uniqueH = new ArrayList<>();
-                for (int i = 0; i < hashes.length; i++) {
-                    long h = hashes[i];
-                    if (seenHashes.add(h)) {
-                        uniqueB.add(canon.get(i));
-                        uniqueH.add(h);
-                    }
-                }
-                if (uniqueH.isEmpty()) {
-                    long elapsed = System.currentTimeMillis() - start;
+                if (step == 0) {
                     System.out.printf("%nStep %d: Theoretical = %s%n", step, theoretical);
-                    System.out.printf("Generated = 0, Difference = %s, Time = %d ms%n",
-                            theoretical, elapsed);
-                    continue;
-                }
-                // 4) win filter
-                byte[] over = runWin(uniqueH);
-                List<String> survivors = new ArrayList<>();
-                for (int i = 0; i < over.length; i++) {
-                    if (over[i] == 0) {
-                        survivors.add(uniqueB.get(i));
+                    System.out.printf("Generated = 1, Difference = %s, Time = 0 ms%n",
+                            theoretical.subtract(BigInteger.ONE));
+                } else {
+                    // 1) canonicalize
+                    List<String> canon = runCanonical(current);
+                    // 2) hash
+                    long[] hashes = runHash(canon);
+                    // 3) dedupe
+                    List<String> uniqueB = new ArrayList<>();
+                    List<Long> uniqueH = new ArrayList<>();
+                    for (int i = 0; i < hashes.length; i++) {
+                        long h = hashes[i];
+                        if (seenHashes.add(h)) {
+                            uniqueB.add(canon.get(i));
+                            uniqueH.add(h);
+                        }
                     }
+                    if (uniqueH.isEmpty()) {
+                        long elapsed = System.currentTimeMillis() - start;
+                        System.out.printf("%nStep %d: Theoretical = %s%n", step, theoretical);
+                        System.out.printf("Generated = 0, Difference = %s, Time = %d ms%n",
+                                theoretical, elapsed);
+                        continue;
+                    }
+                    // 4) win filter
+                    byte[] over = runWin(uniqueH);
+                    List<String> survivors = new ArrayList<>();
+                    for (int i = 0; i < over.length; i++) {
+                        if (over[i] == 0) {
+                            survivors.add(uniqueB.get(i));
+                        }
+                    }
+                    // 5) next player
+                    byte[] nextArr = runNextPlayer(uniqueH);
+                    byte player = nextArr.length > 0 ? nextArr[0] : (byte) 'x';
+                    // 6) expand
+                    List<String> expanded = runExpansion(survivors, player);
+
+                    // Write compressed expansions to lookup table
+                    for (String board : expanded) {
+                        long comp = compressBoard(board);
+                        writer.write(Long.toUnsignedString(comp));
+                        writer.newLine();
+                    }
+                    writer.flush();
+
+                    long elapsed = System.currentTimeMillis() - start;
+                    int generated = uniqueB.size();
+                    BigInteger diff = theoretical.subtract(BigInteger.valueOf(generated));
+                    System.out.printf("%nStep %d: Theoretical = %s%n", step, theoretical);
+                    System.out.printf("Generated = %d, Difference = %s, Time = %d ms%n",
+                            generated, diff, elapsed);
+
+                    current = expanded;
                 }
-                // 5) next player
-                byte[] next = runNextPlayer(uniqueH);
-                byte player = next.length > 0 ? next[0] : (byte) 'x';
-                // 6) expand
-                List<String> expanded = runExpansion(survivors, player);
-
-                long elapsed = System.currentTimeMillis() - start;
-                int generated = uniqueB.size();
-                BigInteger diff = theoretical.subtract(BigInteger.valueOf(generated));
-                System.out.printf("%nStep %d: Theoretical = %s%n", step, theoretical);
-                System.out.printf("Generated = %d, Difference = %s, Time = %d ms%n",
-                        generated, diff, elapsed);
-
-                current = expanded;
             }
         }
 
-        System.out.printf("%nTotal unique canonical states: %d%n",
-                /*seenHashes*/0 /*replace with actual count*/);
+        System.out.printf("%nTotal unique canonical states: %d%n", /*replace with actual count*/0);
         releaseCL();
     }
 
@@ -114,37 +120,31 @@ public class BoardExpansion {
     // ----------------------------
     private static void initCL() {
         CL.setExceptionsEnabled(true);
-        // Platform
         int[] numPlat = new int[1];
         clGetPlatformIDs(0, null, numPlat);
         cl_platform_id[] plats = new cl_platform_id[numPlat[0]];
         clGetPlatformIDs(plats.length, plats, null);
-        // Device
         int[] numDev = new int[1];
         clGetDeviceIDs(plats[0], CL_DEVICE_TYPE_ALL, 0, null, numDev);
         cl_device_id[] devs = new cl_device_id[numDev[0]];
         clGetDeviceIDs(plats[0], CL_DEVICE_TYPE_ALL, devs.length, devs, null);
         device = devs[0];
-        // Context & queue
         context = clCreateContext(null, 1, new cl_device_id[]{device}, null, null, null);
-        cl_queue_properties props = new cl_queue_properties(); // empty
+        cl_queue_properties props = new cl_queue_properties();
         queue = clCreateCommandQueueWithProperties(context, device, props, null);
     }
 
     private static void releaseCL() {
-        // Kernels
         clReleaseKernel(kernHash);
         clReleaseKernel(kernCanon);
         clReleaseKernel(kernExpand);
         clReleaseKernel(kernWin);
         clReleaseKernel(kernNext);
-        // Programs
         clReleaseProgram(progHash);
         clReleaseProgram(progCanon);
         clReleaseProgram(progExpand);
         clReleaseProgram(progWin);
         clReleaseProgram(progNext);
-        // Queue & context
         clReleaseCommandQueue(queue);
         clReleaseContext(context);
     }
@@ -154,14 +154,13 @@ public class BoardExpansion {
     // ----------------------------
     private static void loadResources() throws IOException {
         rotationMaps = loadIntMatrix("rotationMaps.txt", 24, BOARD_SIZE);
-        winLines = loadIntMatrix("winLines.txt", -1, 3);  // match the exact filename
+        winLines = loadIntMatrix("winLines.txt", -1, 3);
         if (winLines.length == 0) {
             throw new IllegalStateException(
                     "winLines.txt loaded 0 entries—check that it’s in the working directory and each line has 3 ints."
             );
         }
     }
-
 
     private static int[] loadIntMatrix(String path, int rows, int cols) throws IOException {
         List<Integer> all = new ArrayList<>();
@@ -204,6 +203,7 @@ public class BoardExpansion {
         clBuildProgram(p, 0, null, null, null, null);
         return p;
     }
+
 
     // ----------------------------
     // Kernel runners
