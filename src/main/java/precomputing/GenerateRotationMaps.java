@@ -19,7 +19,7 @@ public class GenerateRotationMaps {
         System.out.println("Total rotation maps: " + rotationMaps.size());
 
         // Save to file; adjust the filename/path as needed.
-        String filename = "precomputed/rotationMaps.txt";
+        String filename = "src/main/data/rotationMaps.txt";
         try {
             saveRotationMapsToFile(rotationMaps, filename);
             System.out.println("Rotation maps saved to " + filename);
