@@ -73,7 +73,7 @@ public class Board {
         int xWinCount = 0;
         int oWinCount = 0;
 
-        try (BufferedReader br = new BufferedReader(new FileReader("winLines.txt"))) {
+        try (BufferedReader br = new BufferedReader(new FileReader("src/main/resources/precomputed/winLines.txt"))) {
             String line;
             while ((line = br.readLine()) != null) {
                 String[] tokens = line.trim().split("\\s+");

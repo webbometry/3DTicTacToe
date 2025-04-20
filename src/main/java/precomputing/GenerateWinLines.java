@@ -17,7 +17,7 @@ public class GenerateWinLines {
 
     public static void main(String[] args) {
         // The output file to write each winning line.
-        String filename = "winLines.txt";
+        String filename = "precomputed/winLines.txt";
 
         try (PrintWriter writer = new PrintWriter(new FileWriter(filename))) {
             // Iterate through each cell of the 3x3x3 board.
