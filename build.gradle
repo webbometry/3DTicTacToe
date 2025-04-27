@@ -1,0 +1,16 @@
+plugins {
+    id 'java'
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.jocl:jocl:2.0.0'
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.9.3'
+}
+
+test {
+    useJUnitPlatform()
+}
