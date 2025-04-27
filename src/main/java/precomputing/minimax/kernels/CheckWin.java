@@ -1,7 +1,5 @@
 package precomputing.minimax.kernels;
 
-import precomputing.minimax.*;
-
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;

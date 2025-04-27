@@ -2,6 +2,7 @@ package precomputing.minimax.canonicalization;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import precomputing.minimax.kernels.Canonicalization;
 
 import java.nio.file.Paths;
 import java.util.List;

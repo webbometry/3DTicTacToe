@@ -1,4 +1,4 @@
-package precomputing.minimax;
+package support;
 
 import static org.jocl.CL.*;
 
