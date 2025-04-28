@@ -3,7 +3,7 @@
 #define MAX_DEPTH 27
 #define ROTATIONS 24
 
-// Rotation maps (27 × 27), load from rotationMaps.txt
+// Rotation maps (24 × 27), load from rotationMaps.txt
 __constant int rotMaps[ROTATIONS][MAX_DEPTH] = {
     {  2,  1,  0,  5,  4,  3,  8,  7,  6, 11, 10,  9, 14, 13, 12, 17, 16, 15, 20, 19, 18, 23, 22, 21, 26, 25, 24 },
     {  8,  5,  2,  7,  4,  1,  6,  3,  0, 17, 14, 11, 16, 13, 10, 15, 12,  9, 26, 23, 20, 25, 22, 19, 24, 21, 18 },

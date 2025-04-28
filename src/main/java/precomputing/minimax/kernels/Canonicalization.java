@@ -10,7 +10,7 @@ import java.util.stream.Collectors;
 public class Canonicalization {
     private static final int MAX_CELLS = 27;
     private static final int FULL_MASK_BITS = 27;
-    private final int[][] rotMaps;  // [27][27]
+    private final int[][] rotMaps;  // [24][27]
 
     public Canonicalization(Path rotationMapsPath) throws IOException {
         List<String> lines = Files.readAllLines(rotationMapsPath);
