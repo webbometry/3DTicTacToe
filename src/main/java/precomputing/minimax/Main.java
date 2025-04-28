@@ -47,7 +47,7 @@ public class Main {
 
                 // 2) Canonicalization
                 t0 = Instant.now();
-                List<String> reduced = canon.canonicalize(expanded);
+                List<String> reduced = canon.canonicalize(expanded, nextDepth);
                 t1 = Instant.now();
                 long canonMs = Duration.between(t0, t1).toMillis();
                 System.out.printf(
@@ -55,7 +55,7 @@ public class Main {
                         expanded.size(), reduced.size(), expanded.size() - reduced.size(), canonMs
                 );
 
-                if (step < 8) {
+                if (step > 8) {
                     // 3) Check for terminal positions
                     t0 = Instant.now();
                     CheckWin.Result result = checkwin.check(reduced, nextDepth);
@@ -74,6 +74,9 @@ public class Main {
                     // 5) Prepare for next iteration
                     boards = result.nonTerminals;
                 } else {
+                    System.out.printf("%5d ongoing", reduced.size());
+                    System.out.println();
+
                     // Prepare for next iteration
                     boards = reduced;
                 }

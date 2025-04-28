@@ -30,13 +30,13 @@ public class Canonicalization {
      * @return the canonicalized set: no duplicates, no pure permutations,
      * no rotational redundancies.
      */
-    public List<String> canonicalize(List<String> boards) {
-        // 1) Drop any board that has a repeated character
+    public List<String> canonicalize(List<String> boards, int step) {
+        // 1) Drop any with repeated chars
         List<String> noDups = boards.parallelStream()
                 .filter(this::hasNoRepeats)
                 .collect(Collectors.toList());
 
-        // 2) Collapse pure permutations (same multiset of characters)
+        // 2) Collapse pure permutations
         ConcurrentMap<String, String> sigToBoard = noDups.parallelStream()
                 .map(b -> {
                     char[] a = b.toCharArray();
@@ -46,20 +46,17 @@ public class Canonicalization {
                 .collect(Collectors.toConcurrentMap(
                         Map.Entry::getKey,
                         Map.Entry::getValue,
-                        (keep, discard) -> keep
+                        (keep, drop) -> keep
                 ));
         List<String> noPerms = List.copyOf(sigToBoard.values());
 
-        // 3) Collapse rotational equivalences
-        ConcurrentMap<String, String> canonToBoard = noPerms.parallelStream()
-                .map(b -> new AbstractMap.SimpleEntry<>(canonicalRotation(b), b))
-                .collect(Collectors.toConcurrentMap(
-                        Map.Entry::getKey,
-                        Map.Entry::getValue,
-                        (keep, discard) -> keep
-                ));
+        // 3) GPU rotation‐canonicalization
+        List<String> rotated = new RotationCanonicalizerGPU().canonicalize(noPerms, step);
 
-        return List.copyOf(canonToBoard.values());
+        // 4) Dedupe canonical results
+        return rotated.parallelStream()
+                .distinct()
+                .collect(Collectors.toList());
     }
 
     /**
