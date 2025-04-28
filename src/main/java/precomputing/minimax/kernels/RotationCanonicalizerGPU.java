@@ -48,10 +48,14 @@ public class RotationCanonicalizerGPU {
         clSetKernelArg(kernel, 0, Sizeof.cl_mem, Pointer.to(memIn));
         clSetKernelArg(kernel, 1, Sizeof.cl_mem, Pointer.to(memOut));
         clSetKernelArg(kernel, 2, Sizeof.cl_int, Pointer.to(new int[]{step}));
-        clEnqueueNDRangeKernel(
-                CLContextManager.getQueue(),
-                kernel, 1, null,
-                new long[]{n}, null,
+
+        int localSize = 256;
+        int globalSize = ((n + localSize - 1) / localSize) * localSize;
+
+        clEnqueueNDRangeKernel(CLContextManager.getQueue(), kernel,
+                1, null,
+                new long[]{globalSize},
+                new long[]{localSize},
                 0, null, null);
 
         // read back
