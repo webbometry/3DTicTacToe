@@ -41,8 +41,8 @@ public class Main {
                 Instant t1 = Instant.now();
                 long expMs = Duration.between(t0, t1).toMillis();
                 System.out.printf(
-                        "Expansion:   %5d → %5d  (%,d new) in %d ms%n",
-                        boards.size(), expanded.size(), expanded.size() - boards.size(), expMs
+                        "Expansion: %5d boards in %d ms%n",
+                        expanded.size(), expMs
                 );
 
                 // 2) Canonicalization
@@ -55,7 +55,7 @@ public class Main {
                         expanded.size(), reduced.size(), expanded.size() - reduced.size(), canonMs
                 );
 
-                if (step > 8) {
+                if (step >= 8) {
                     // 3) Check for terminal positions
                     t0 = Instant.now();
                     CheckWin.Result result = checkwin.check(reduced, nextDepth);

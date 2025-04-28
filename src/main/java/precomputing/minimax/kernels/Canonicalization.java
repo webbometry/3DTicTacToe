@@ -1,80 +1,108 @@
 package precomputing.minimax.kernels;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentMap;
 import java.util.stream.Collectors;
 
-/**
- * Fully parallel canonicalization: duplicates → permutations → rotations.
- */
 public class Canonicalization {
-    private final int[][] rotMaps;      // [27][27]
-    private final List<char[]> lowerLines, upperLines;
+    private static final int MAX_CELLS = 27;
+    private static final int FULL_MASK_BITS = 27;
+    private final int[][] rotMaps;  // [27][27]
 
     public Canonicalization(Path rotationMapsPath) throws IOException {
-        // load rotation maps
-        var lines = java.nio.file.Files.readAllLines(rotationMapsPath);
+        List<String> lines = Files.readAllLines(rotationMapsPath);
         rotMaps = new int[lines.size()][];
         for (int i = 0; i < lines.size(); i++) {
-            var parts = lines.get(i).trim().split("\\s+");
+            String[] parts = lines.get(i).trim().split("\\s+");
             rotMaps[i] = Arrays.stream(parts).mapToInt(Integer::parseInt).toArray();
         }
-        // load win-lines if you also want to parallelize CheckWin here...
-        lowerLines = upperLines = List.of(); // not used in this class
     }
 
     /**
-     * @param boards raw list of move-sequence strings
-     * @return the canonicalized set: no duplicates, no pure permutations,
-     * no rotational redundancies.
+     * @param boards list of move-sequence strings (each char is A–Z, a–z, '.' or ',')
+     * @param step   length of each string in boards
+     * @return one representative string per equivalence class
      */
     public List<String> canonicalize(List<String> boards, int step) {
-        // 1) Drop any with repeated chars
+        // 1) Drop any with repeated chars (fast parallel scan)
         List<String> noDups = boards.parallelStream()
                 .filter(this::hasNoRepeats)
                 .collect(Collectors.toList());
 
-        // 2) Collapse pure permutations
-        ConcurrentMap<String, String> sigToBoard = noDups.parallelStream()
+        // 2) Collapse pure permutations: build a 54-bit signature, keep first string
+        ConcurrentMap<Long, String> permMap = noDups.parallelStream()
+                .map(b -> Map.entry(signature(b), b))
+                .collect(Collectors.toConcurrentMap(
+                        Map.Entry::getKey,
+                        Map.Entry::getValue,
+                        (keep, drop) -> keep
+                ));
+        List<String> noPerms = List.copyOf(permMap.values());
+
+        // 3) Collapse rotations: for each board, compute its minimal 54-bit rotated mask
+        ConcurrentMap<Long, String> rotMap = noPerms.parallelStream()
                 .map(b -> {
-                    char[] a = b.toCharArray();
-                    Arrays.sort(a);
-                    return new AbstractMap.SimpleEntry<>(new String(a), b);
+                    // build the base bit-masks
+                    long baseX = 0, baseO = 0;
+                    for (char c : b.toCharArray()) {
+                        if (c >= 'A' && c <= 'Z') baseX |= 1L << (c - 'A');
+                        else if (c >= 'a' && c <= 'z') baseO |= 1L << (c - 'a');
+                        else if (c == '.') baseX |= 1L << 26;
+                        else if (c == ',') baseO |= 1L << 26;
+                    }
+
+                    // find the lexicographically minimal rotation‐code
+                    long best = Long.MAX_VALUE;
+                    for (int[] map : rotMaps) {
+                        long x = 0, o = 0;
+
+                        // CORRECT: remap every occupied cell
+                        long bits = baseX | baseO;
+                        while (bits != 0) {
+                            int src = Long.numberOfTrailingZeros(bits);
+                            bits &= bits - 1;
+                            if (((baseX >>> src) & 1) == 1) {
+                                x |= 1L << map[src];
+                            } else {
+                                o |= 1L << map[src];
+                            }
+                        }
+
+                        long code = (x << FULL_MASK_BITS) | o;
+                        if (code < best) best = code;
+                    }
+
+                    return Map.entry(best, b);
                 })
                 .collect(Collectors.toConcurrentMap(
                         Map.Entry::getKey,
                         Map.Entry::getValue,
                         (keep, drop) -> keep
                 ));
-        List<String> noPerms = List.copyOf(sigToBoard.values());
 
-        // 3) GPU rotation‐canonicalization
-        List<String> rotated = new RotationCanonicalizerGPU().canonicalize(noPerms, step);
-
-        // 4) Dedupe canonical results
-        return rotated.parallelStream()
-                .distinct()
-                .collect(Collectors.toList());
+        // 4) Return the representative strings
+        return List.copyOf(rotMap.values());
     }
 
     /**
-     * Returns true iff no character appears twice in b.
+     * Returns true iff no character appears twice in the string.
      */
     private boolean hasNoRepeats(String b) {
-        boolean[] up = new boolean[26];
-        boolean[] lo = new boolean[26];
+        boolean[] up = new boolean[26], lo = new boolean[26];
         boolean dot = false, comma = false;
-        for (char c : b.toCharArray()) {
+        for (int i = 0; i < b.length(); i++) {
+            char c = b.charAt(i);
             if (c >= 'A' && c <= 'Z') {
-                int i = c - 'A';
-                if (up[i]) return false;
-                up[i] = true;
+                int idx = c - 'A';
+                if (up[idx]) return false;
+                up[idx] = true;
             } else if (c >= 'a' && c <= 'z') {
-                int i = c - 'a';
-                if (lo[i]) return false;
-                lo[i] = true;
+                int idx = c - 'a';
+                if (lo[idx]) return false;
+                lo[idx] = true;
             } else if (c == '.') {
                 if (dot) return false;
                 dot = true;
@@ -87,31 +115,17 @@ public class Canonicalization {
     }
 
     /**
-     * Returns the lexicographically smallest rotation of b under your rotMaps.
+     * Build a 54-bit signature for the multiset of moves in b:
+     * upper 27 bits for X, lower 27 for O.
      */
-    private String canonicalRotation(String b) {
-        String best = null;
-        int L = b.length();
-        for (int[] map : rotMaps) {
-            char[] tmp = new char[L];
-            for (int i = 0; i < L; i++) {
-                char c = b.charAt(i), out;
-                int idx = (c == '.' || c == ',') ? 26
-                        : (c >= 'A' && c <= 'Z') ? (c - 'A')
-                        : (c - 'a');
-                int r = map[idx];
-                if (c >= 'A' && c <= 'Z') {
-                    out = (r == 26) ? '.' : (char) ('A' + r);
-                } else {
-                    out = (r == 26) ? ',' : (char) ('a' + r);
-                }
-                tmp[i] = out;
-            }
-            String cand = new String(tmp);
-            if (best == null || cand.compareTo(best) < 0) {
-                best = cand;
-            }
+    private long signature(String b) {
+        long up = 0, lo = 0;
+        for (char c : b.toCharArray()) {
+            if (c >= 'A' && c <= 'Z') up |= 1L << (c - 'A');
+            else if (c >= 'a' && c <= 'z') lo |= 1L << (c - 'a');
+            else if (c == '.') up |= 1L << 26;
+            else if (c == ',') lo |= 1L << 26;
         }
-        return best;
+        return (up << FULL_MASK_BITS) | lo;
     }
 }

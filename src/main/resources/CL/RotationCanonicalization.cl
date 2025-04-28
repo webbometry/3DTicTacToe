@@ -1,7 +1,7 @@
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
 #define MAX_DEPTH 27
-#define ROTATIONS 27
+#define ROTATIONS 24
 
 // Rotation maps (27 × 27), load from rotationMaps.txt
 __constant int rotMaps[ROTATIONS][MAX_DEPTH] = {
