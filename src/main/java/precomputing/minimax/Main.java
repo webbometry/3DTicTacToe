@@ -35,7 +35,7 @@ public class Main {
                 int nextDepth = step + 1;
                 System.out.printf("=== Step %2d (depth=%d) ===%n", nextDepth, nextDepth);
 
-                long MAX_MEMORY_BYTES = 60L * 1024 * 1024 * 1024;
+                long MAX_MEMORY_BYTES = 60L * 1024 * 1024 * 1024; // 60 GB
                 int EST_BYTES_PER_BOARD = 100;
                 int totalBoardsCount = boards.size();
                 long estMemory = (long) totalBoardsCount * EST_BYTES_PER_BOARD;
@@ -60,7 +60,7 @@ public class Main {
                     Instant bt1 = Instant.now();
                     long bexpMs = Duration.between(bt0, bt1).toMillis();
                     System.out.printf(
-                            " Batch %d/%d Expansion: %7d → %7d boards in %d ms%n",
+                            " Batch %d/%d Expansion: %5d → %5d boards in %d ms%n",
                             bi + 1, batches,
                             batchBoards.size(), expandedBatch.size(), bexpMs
                     );
@@ -72,7 +72,7 @@ public class Main {
                     Instant bc1 = Instant.now();
                     long bcanonMs = Duration.between(bc0, bc1).toMillis();
                     System.out.printf(
-                            " Batch %d/%d Canonical:  %7d → %7d (invalid: %,6d, dupes: %,6d, rotations: %,6d, total removed: %,6d) in %d ms%n",
+                            " Batch %d/%d Canonical:  %5d → %5d (invalid: %,4d, dupes: %,4d, rotations: %,4d, total removed: %,4d) in %d ms%n",
                             bi + 1, batches,
                             expandedBatch.size(), reducedBatch.size(),
                             bRes.removedInvalid(), bRes.removedDuplicates(), bRes.removedRotations(),
@@ -95,15 +95,24 @@ public class Main {
                 List<String> reduced = List.copyOf(allReducedSet);
 
                 if (step >= 8) {
-                    // === BATCHED CHECKWIN ===
+                    System.out.println("=== CheckWin Phase ===");
+
+                    int checkTotal = reduced.size();
+                    long checkEstMem = (long) checkTotal * EST_BYTES_PER_BOARD;
+                    int checkBatches = (int) Math.ceil((double) checkEstMem / MAX_MEMORY_BYTES);
+                    checkBatches = Math.max(checkBatches, 1);
+
+                    System.out.printf(
+                            "Estimated CheckWin memory: %.2f GB (%d boards). Splitting into %d batch(es)...%n",
+                            checkEstMem / 1e9, checkTotal, checkBatches
+                    );
+
                     List<String> terminals = new ArrayList<>();
                     List<String> nonTerminals = new ArrayList<>();
-                    int checkBatchSize = 500_000;
-                    int numCheckBatches = (int) Math.ceil((double) reduced.size() / checkBatchSize);
 
-                    for (int i = 0; i < numCheckBatches; i++) {
-                        int from = i * checkBatchSize;
-                        int to = Math.min((i + 1) * checkBatchSize, reduced.size());
+                    for (int i = 0; i < checkBatches; i++) {
+                        int from = i * checkTotal / checkBatches;
+                        int to = (i + 1) * checkTotal / checkBatches;
                         List<String> checkBatch = reduced.subList(from, to);
 
                         Instant cbStart = Instant.now();
@@ -114,12 +123,15 @@ public class Main {
                         nonTerminals.addAll(partial.nonTerminals);
 
                         long cbMs = Duration.between(cbStart, cbEnd).toMillis();
-                        System.out.printf(
-                                "CheckWin batch %d/%d: %7d → %7d terminals, %7d ongoing in %d ms%n",
-                                i + 1, numCheckBatches, checkBatch.size(),
-                                partial.terminals.size(), partial.nonTerminals.size(), cbMs
-                        );
+                        System.out.printf(" CheckWin batch %d/%d: %d → %d terminals, %d ongoing in %d ms%n",
+                                i + 1, checkBatches, checkBatch.size(),
+                                partial.terminals.size(), partial.nonTerminals.size(), cbMs);
+
                         runningTotal += cbMs;
+
+                        checkBatch = null;
+                        partial = null;
+                        System.gc();
                     }
 
                     if (!terminals.isEmpty()) {
@@ -128,7 +140,7 @@ public class Main {
 
                     boards = nonTerminals;
                 } else {
-                    System.out.printf("%7d ongoing%n", reduced.size());
+                    System.out.printf("%5d ongoing%n", reduced.size());
                     boards = reduced;
                 }
 
