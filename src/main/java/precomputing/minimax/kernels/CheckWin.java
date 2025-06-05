@@ -16,6 +16,8 @@ public class CheckWin {
     private final List<char[]> lowerLines = new ArrayList<>();
     private final List<char[]> upperLines = new ArrayList<>();
 
+    private static String score;
+
     public static class Result {
         public final List<String> terminals;
         public final List<String> nonTerminals;
@@ -78,6 +80,7 @@ public class CheckWin {
                 terminal = false;
             } else if (step == MAX_DEPTH) {
                 // full board → draw
+                score = "0";
                 terminal = true;
             } else {
                 terminal = false;
@@ -86,6 +89,7 @@ public class CheckWin {
                     if (b.indexOf(tri[0]) >= 0
                             && b.indexOf(tri[1]) >= 0
                             && b.indexOf(tri[2]) >= 0) {
+                        score = "27";
                         terminal = true;
                         break;
                     }
@@ -96,6 +100,7 @@ public class CheckWin {
                         if (b.indexOf(tri[0]) >= 0
                                 && b.indexOf(tri[1]) >= 0
                                 && b.indexOf(tri[2]) >= 0) {
+                            score = "-27";
                             terminal = true;
                             break;
                         }
@@ -103,7 +108,7 @@ public class CheckWin {
                 }
             }
 
-            if (terminal) terms.add(b + ":");
+            if (terminal) terms.add(b + ":" + score);
             else nonTerms.add(b);
         }
 
