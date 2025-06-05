@@ -77,6 +77,7 @@ public class Game extends JFrame {
         }
 
         currentPlayer = (currentPlayer == playerX) ? playerO : playerX;
+        optionsPanel.updateCurrentMoveLabel();
     }
 
     public static void main(String[] args) {

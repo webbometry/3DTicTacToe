@@ -14,6 +14,8 @@ public class OptionsPanel extends JPanel {
     // For now, only one option is available.
     private String[] playerOptions = {"Human"};
 
+    private JLabel currentMoveLabel;
+
     private Game game;
     private BoardPanel boardPanel;
     private EvaluationPanel evalPanel;
@@ -59,8 +61,18 @@ public class OptionsPanel extends JPanel {
         add(player2ComboBox);
 
         // Add a new label at the bottom to display the current move.
-        JLabel currentMoveLabel = new JLabel("Current Move: " + game.currentPlayer.getSymbol());
+        currentMoveLabel = new JLabel("Current Move: " + game.currentPlayer.getSymbol());
+        System.out.println("update");
         add(Box.createRigidArea(new Dimension(0, 20)));
         add(currentMoveLabel);
+    }
+    public void updateCurrentMoveLabel() {
+        SwingUtilities.invokeLater(() -> {
+            if (currentMoveLabel != null && game != null && game.currentPlayer != null) {
+                currentMoveLabel.setText("Current Move: " + game.currentPlayer.getSymbol());
+                currentMoveLabel.revalidate();
+                currentMoveLabel.repaint();
+            }
+        });
     }
 }
