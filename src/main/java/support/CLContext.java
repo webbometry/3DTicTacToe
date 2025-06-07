@@ -2,6 +2,7 @@ package support;
 
 import org.jocl.*;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -24,37 +25,62 @@ public class CLContext {
     public CLContext(String kernelResourcePath) throws IOException {
         CL.setExceptionsEnabled(true);
 
-        // 1) Pick platform & device
-        cl_platform_id[] plats = new cl_platform_id[1];
-        clGetPlatformIDs(1, plats, null);
-        cl_device_id[] devs = new cl_device_id[1];
-        clGetDeviceIDs(plats[0], CL_DEVICE_TYPE_GPU, 1, devs, null);
-        cl_device_id device = devs[0];
+        // 1) Pick the NVIDIA GPU if present
+        cl_platform_id[] platforms = new cl_platform_id[1];
+        clGetPlatformIDs(1, platforms, null);
+
+        cl_device_id selected = null;
+        // Query how many GPU devices
+        int[] gpuCount = new int[1];
+        clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_GPU, 0, null, gpuCount);
+        cl_device_id[] gpus = new cl_device_id[gpuCount[0]];
+        clGetDeviceIDs(platforms[0], CL_DEVICE_TYPE_GPU, gpus.length, gpus, null);
+
+        for (cl_device_id d : gpus) {
+            byte[] buf = new byte[1024];
+            clGetDeviceInfo(d, CL_DEVICE_VENDOR, buf.length, Pointer.to(buf), null);
+            String vendor = new String(buf, StandardCharsets.UTF_8).trim();
+            if (vendor.toLowerCase().contains("nvidia")) {
+                selected = d;
+                break;
+            }
+        }
+        if (selected == null && gpus.length > 0) {
+            selected = gpus[0];
+            System.out.println("Warning: NVIDIA GPU not found, using first GPU: " +
+                    deviceName(gpus[0]));
+        }
+        if (selected == null) {
+            throw new IllegalStateException("No OpenCL GPU devices found");
+        }
 
         // 2) Query VRAM & max alloc
         long[] tmp = new long[1];
-        clGetDeviceInfo(device, CL_DEVICE_GLOBAL_MEM_SIZE,
-                Sizeof.cl_ulong, Pointer.to(tmp), null);
+        clGetDeviceInfo(selected, CL_DEVICE_GLOBAL_MEM_SIZE, Sizeof.cl_ulong, Pointer.to(tmp), null);
         totalMemBytes = tmp[0];
-        clGetDeviceInfo(device, CL_DEVICE_MAX_MEM_ALLOC_SIZE,
-                Sizeof.cl_ulong, Pointer.to(tmp), null);
+        clGetDeviceInfo(selected, CL_DEVICE_MAX_MEM_ALLOC_SIZE, Sizeof.cl_ulong, Pointer.to(tmp), null);
         maxAllocBytes = tmp[0];
-        System.out.printf("VRAM = %,d MB; max alloc = %,d MB%n",
+        System.out.printf("Using device %s%n", deviceName(selected));
+        System.out.printf("  VRAM = %,d MB; max single alloc = %,d MB%n",
                 totalMemBytes/(1024*1024), maxAllocBytes/(1024*1024));
 
-        // 3) Create context + queue
-        ctx   = clCreateContext(null, 1, devs, null, null, null);
-        queue = clCreateCommandQueue(ctx, device, 0, null);
+        // 3) Create context & queue
+        ctx   = clCreateContext(null, 1, new cl_device_id[]{selected}, null, null, null);
+        queue = clCreateCommandQueue(ctx, selected, 0, null);
 
-        // 4) Load .cl from classpath
+        // 4) Load kernel source from classpath
         String kernelSrc;
-        try (var is = getClass().getClassLoader()
+        try (InputStream is = getClass()
+                .getClassLoader()
                 .getResourceAsStream(kernelResourcePath)) {
-            if (is == null) throw new IOException("Missing resource: "+kernelResourcePath);
-            kernelSrc = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            if (is == null) {
+                throw new IOException("Kernel not found on classpath: " + kernelResourcePath);
+            }
+            byte[] bytes = is.readAllBytes();
+            kernelSrc = new String(bytes, StandardCharsets.UTF_8);
         }
 
-        // 5) Read winLines.txt (space-separated triples) into bitmasks
+        // 5) Read winLines.txt (space-separated indices) into masks[]
         List<String> lines = Files.readAllLines(
                 Paths.get("C:\\Users\\webbometric\\Documents\\GitHub\\3DTicTacToe\\src\\main\\data\\winLines.txt"),
                 StandardCharsets.UTF_8
@@ -71,7 +97,7 @@ public class CLContext {
             masks[i] = m;
         }
 
-        // 6) Prepend a header that defines WIN_MASKS[N]
+        // 6) Build header with WIN_MASKS[N]
         StringBuilder header = new StringBuilder();
         header.append("__constant ulong WIN_MASKS[").append(N).append("] = {");
         for (int i = 0; i < N; i++) {
@@ -89,5 +115,12 @@ public class CLContext {
 
         // 8) Create kernel
         kernel = clCreateKernel(program, "expand_and_classify", null);
+    }
+
+    /** Helper to query device name */
+    private static String deviceName(cl_device_id d) {
+        byte[] buf = new byte[1024];
+        clGetDeviceInfo(d, CL_DEVICE_NAME, buf.length, Pointer.to(buf), null);
+        return new String(buf, StandardCharsets.UTF_8).trim();
     }
 }
