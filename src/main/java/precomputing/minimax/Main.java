@@ -35,7 +35,7 @@ public class Main {
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
         hb.scheduleAtFixedRate(() -> {
             String now = LocalDateTime.now().format(fmt);
-            System.out.printf("[%s] Still running… heartbeat #%d%n", now, hbCount.incrementAndGet());
+            System.out.printf("[%s] Still running #%d%n", now, hbCount.incrementAndGet());
         }, 1, 1, TimeUnit.MINUTES);
 
         // 5) BFS—disk‐backed
