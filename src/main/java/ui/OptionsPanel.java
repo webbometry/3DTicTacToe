@@ -37,17 +37,17 @@ public class OptionsPanel extends JPanel {
         player2ComboBox = new JComboBox<>(playerOptions);
         player2ComboBox.setMaximumSize(new Dimension(120, 25));
 
-        JLabel player1Label = new JLabel("Player 1:");
-        JLabel player2Label = new JLabel("Player 2:");
+        JLabel player1Label = new JLabel("Player X:");
+        JLabel player2Label = new JLabel("Player O:");
 
         toggleScoresCheckBox.addActionListener(e -> boardPanel.toggleScores());
         toggleEvalBarCheckBox.addActionListener(e -> evalPanel.setVisible(toggleEvalBarCheckBox.isSelected()));
 
         // Log the player selection for now.
         player1ComboBox.addActionListener(e ->
-                System.out.println("Player 1 set to: " + player1ComboBox.getSelectedItem()));
+                System.out.println("Player X set to: " + player1ComboBox.getSelectedItem()));
         player2ComboBox.addActionListener(e ->
-                System.out.println("Player 2 set to: " + player2ComboBox.getSelectedItem()));
+                System.out.println("Player O set to: " + player2ComboBox.getSelectedItem()));
 
         add(Box.createRigidArea(new Dimension(0, 20)));
         add(toggleScoresCheckBox);
