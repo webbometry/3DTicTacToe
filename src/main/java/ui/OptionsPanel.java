@@ -5,14 +5,17 @@ import game.*;
 import javax.swing.*;
 import java.awt.*;
 
+import players.HumanPlayer;
+import players.NeuralNetworkPlayer;
+
+
 public class OptionsPanel extends JPanel {
     private JCheckBox toggleScoresCheckBox;
     private JCheckBox toggleEvalBarCheckBox;
     private JComboBox<String> player1ComboBox;
     private JComboBox<String> player2ComboBox;
 
-    // For now, only one option is available.
-    private String[] playerOptions = {"Human"};
+    private String[] playerOptions = { "Human", "NeuralNet" };
 
     private JLabel currentMoveLabel;
 
@@ -34,8 +37,26 @@ public class OptionsPanel extends JPanel {
         // Set dropdowns to a smaller height.
         player1ComboBox = new JComboBox<>(playerOptions);
         player1ComboBox.setMaximumSize(new Dimension(120, 25));
+        player1ComboBox.addActionListener(e -> {
+            String sel = (String) player1ComboBox.getSelectedItem();
+            if ("Human".equals(sel)) {
+                game.setPlayerX(new HumanPlayer(Board.Player.X));
+            } else {
+                game.setPlayerX(new NeuralNetworkPlayer(Board.Player.X));
+            }
+            System.out.println("Player X set to: " + sel);
+        });
         player2ComboBox = new JComboBox<>(playerOptions);
         player2ComboBox.setMaximumSize(new Dimension(120, 25));
+        player2ComboBox.addActionListener(e -> {
+            String sel = (String) player2ComboBox.getSelectedItem();
+            if ("Human".equals(sel)) {
+                game.setPlayerO(new HumanPlayer(Board.Player.O));
+            } else {
+                game.setPlayerO(new NeuralNetworkPlayer(Board.Player.O));
+            }
+            System.out.println("Player O set to: " + sel);
+        });
 
         JLabel player1Label = new JLabel("Player X:");
         JLabel player2Label = new JLabel("Player O:");

@@ -7,21 +7,28 @@ __kernel void expand_and_classify(
     const uint             inCount,
     const uint             depth,
 
+    // frontier
     __global ulong*        outFrontier,
     __global atomic_ulong* frontierIdx,
 
+    // X-win
     __global ulong*        outTermX,
     __global atomic_ulong* termXIdx,
 
+    // O-win
     __global ulong*        outTermO,
-    __global atomic_ulong* termOIdx
+    __global atomic_ulong* termOIdx,
+
+    // Tie (full board)
+    __global ulong*        outTermTie,
+    __global atomic_ulong* termTieIdx
 ) {
     uint gid      = get_global_id(0);
     uint bIdx     = gid / 27;
     uint bitIndex = gid % 27;
     if (bIdx >= inCount) return;
 
-    // unpack 54-bit board
+    // unpack
     ulong board = inBoards[bIdx];
     ulong xBits  =  board           & 0x7FFFFFFUL;
     ulong oBits  = (board >> 27)    & 0x7FFFFFFUL;
@@ -31,34 +38,40 @@ __kernel void expand_and_classify(
     ulong other  = isXturn ? oBits   : xBits;
     ulong mask   = 1UL << bitIndex;
 
-    if ((curr & mask) || (other & mask)) return; // occupied
+    // occupied?
+    if ((curr & mask) || (other & mask)) return;
 
-    // flip one bit
+    // flip it
     ulong newCurr  = curr | mask;
     ulong newX     = isXturn ? newCurr : xBits;
     ulong newO     = isXturn ? oBits    : newCurr;
     ulong newBoard = newX | (newO << 27);
 
-    // count up to 2 lines
+    // 1) check two 3-in-a-rows → X-win or O-win
     uint winX = 0, winO = 0;
-    uint N     = sizeof(WIN_MASKS)/sizeof(WIN_MASKS[0]);
-    for (uint i = 0; i < N; i++) {
+    uint WN = sizeof(WIN_MASKS)/sizeof(WIN_MASKS[0]);
+    for (uint i = 0; i < WN; i++) {
         ulong m = WIN_MASKS[i];
         if ((newX & m) == m && ++winX == 2) {
-            // X wins: atomically reserve a slot in termXIdx
             ulong idx = atom_inc((__global volatile ulong*)termXIdx);
             outTermX[idx] = newBoard;
             return;
         }
         if ((newO & m) == m && ++winO == 2) {
-            // O wins
             ulong idx = atom_inc((__global volatile ulong*)termOIdx);
             outTermO[idx] = newBoard;
             return;
         }
     }
 
-    // not terminal → enqueue to frontier
+    // 2) draw if full (27 bits set)
+    if (((newX | newO) == 0x7FFFFFFUL)) {
+        ulong idx = atom_inc((__global volatile ulong*)termTieIdx);
+        outTermTie[idx] = newBoard;
+        return;
+    }
+
+    // 3) otherwise frontier
     ulong fpos = atom_inc((__global volatile ulong*)frontierIdx);
     outFrontier[fpos] = newBoard;
 }

@@ -25,6 +25,7 @@ public class BoardPanel extends JPanel {
         addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
+                if (!isEnabled()) return;
                 int panelWidth = getWidth() - 2 * sideMargin;
                 int panelHeight = getHeight() - topMargin - bottomMargin;
                 int totalGap = boardGap * 2; // two gaps for three boards
@@ -57,6 +58,13 @@ public class BoardPanel extends JPanel {
 
     public void toggleScores() {
         showScores = !showScores;
+        repaint();
+    }
+
+    @Override
+    public void setEnabled(boolean enabled) {
+        super.setEnabled(enabled);
+        // optional: give a visual cue when disabled
         repaint();
     }
 
@@ -124,5 +132,6 @@ public class BoardPanel extends JPanel {
             g.setColor(Color.BLACK);
             g.drawString("Level " + level, sideMargin + 5, yOffset + 15);
         }
+
     }
 }
