@@ -62,7 +62,6 @@ public class OptionsPanel extends JPanel {
 
         // Add a new label at the bottom to display the current move.
         currentMoveLabel = new JLabel("Current Move: " + game.currentPlayer.getSymbol());
-        System.out.println("update");
         add(Box.createRigidArea(new Dimension(0, 20)));
         add(currentMoveLabel);
     }
