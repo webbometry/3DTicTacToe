@@ -15,7 +15,7 @@ public class Main {
     private static final int MAX_DEPTH = 27;
     static final long RAM_BUDGET_BYTES = 40L * 1024 * 1024 * 1024; // 40 GB
     static final int EXPANSION_FACTOR = 27;
-    static int MAX_BOARDS_PER_BATCH; // = (int) (RAM_BUDGET_BYTES / (Long.BYTES * (1 + EXPANSION_FACTOR)));
+    static int MAX_BOARDS_PER_BATCH = (int) (RAM_BUDGET_BYTES / (Long.BYTES * (1 + EXPANSION_FACTOR)));
     private static final long MAX_POSSIBLE_TERMS = 1_000_000_000L;
 
     public static void main(String[] args) throws IOException {
