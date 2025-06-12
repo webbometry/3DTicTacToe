@@ -9,7 +9,7 @@ import java.awt.event.MouseEvent;
 
 public class BoardPanel extends JPanel {
     private Game game;
-    private boolean showScores = true; // toggle for showing score numbers
+    private boolean showScores = false; // toggle for showing score numbers
 
     // Layout parameters.
     private final int sideMargin = 20;   // left/right margin

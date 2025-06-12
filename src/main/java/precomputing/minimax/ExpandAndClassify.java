@@ -1,26 +1,20 @@
 package precomputing.minimax;
 
+import com.carrotsearch.hppc.LongArrayList;
 import support.CLContext;
 import org.jocl.*;
 
-import java.util.ArrayList;
-import java.util.List;
-
 import static org.jocl.CL.*;
 
-/**
- * GPU expansion + classification; returns frontier in safe chunks,
- * plus termX, termO, termTie arrays.
- */
+
 public class ExpandAndClassify {
     private final CLContext cl;
-    private final int       maxBoards;
+    private final int maxBoards;
 
     public static class Result {
-        public final List<long[]> frontierChunks;
-        public final long[] termX, termO, termTie;
-        public Result(List<long[]> fc,
-                      long[] x, long[] o, long[] t) {
+        public final LongArrayList frontierChunks;
+        public final LongArrayList termX, termO, termTie;
+        public Result(LongArrayList fc, LongArrayList x, LongArrayList o, LongArrayList t) {
             this.frontierChunks = fc;
             this.termX = x;
             this.termO = o;
@@ -29,20 +23,20 @@ public class ExpandAndClassify {
     }
 
     public ExpandAndClassify(CLContext cl, int maxBoards) {
-        this.cl        = cl;
+        this.cl = cl;
         this.maxBoards = maxBoards;
     }
 
-    public Result run(long[] inputBoards, int depth) {
-        int inCount = inputBoards.length;
+    public Result run(LongArrayList inputBoards, int depth) {
+        int inCount = inputBoards.size();
         int totalThds = inCount * 27;
-        int maxOut    = inCount * 27;
+        int maxOut = inCount * 27;
 
         // 1) Allocate device buffers
         cl_mem bufIn  = clCreateBuffer(cl.ctx,
                 CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR,
                 Sizeof.cl_ulong * inCount,
-                Pointer.to(inputBoards), null);
+                Pointer.to(inputBoards.buffer), null);
 
         cl_mem bufFr  = clCreateBuffer(cl.ctx,
                 CL_MEM_READ_WRITE,
@@ -106,30 +100,30 @@ public class ExpandAndClassify {
         clEnqueueReadBuffer(cl.queue, ctrT, CL_TRUE, 0, Sizeof.cl_ulong, Pointer.to(cntT), 0, null, null);
 
         // 5) Read back terminal arrays
-        long[] termX  = new long[(int)cntX[0]];
-        long[] termO  = new long[(int)cntO[0]];
-        long[] termTie= new long[(int)cntT[0]];
-        if (termX.length  > 0)
+        LongArrayList termX  = new LongArrayList((int)cntX[0]);
+        LongArrayList termTie= new LongArrayList((int)cntT[0]);
+        LongArrayList termO  = new LongArrayList((int)cntO[0]);
+        if (termX.size()  > 0)
             clEnqueueReadBuffer(cl.queue, bufTX, CL_TRUE, 0,
-                    termX.length * Sizeof.cl_ulong, Pointer.to(termX), 0, null, null);
-        if (termO.length  > 0)
+                    termX.size() * Sizeof.cl_ulong, Pointer.to(termX.buffer), 0, null, null);
+        if (termO.size()  > 0)
             clEnqueueReadBuffer(cl.queue, bufTO, CL_TRUE, 0,
-                    termO.length * Sizeof.cl_ulong, Pointer.to(termO), 0, null, null);
-        if (termTie.length> 0)
+                    termO.size() * Sizeof.cl_ulong, Pointer.to(termO.buffer), 0, null, null);
+        if (termTie.size()> 0)
             clEnqueueReadBuffer(cl.queue, bufTT, CL_TRUE, 0,
-                    termTie.length * Sizeof.cl_ulong, Pointer.to(termTie), 0, null, null);
+                    termTie.size() * Sizeof.cl_ulong, Pointer.to(termTie.buffer), 0, null, null);
 
         // 6) Read frontier in <= maxBoards chunks
-        List<long[]> frontierChunks = new ArrayList<>();
+        LongArrayList frontierChunks = new LongArrayList();
         long rem = cntF[0], off = 0;
         while (rem > 0) {
             int chunkSize = (int)Math.min(maxBoards, rem);
-            long[] chunk = new long[chunkSize];
+            LongArrayList chunk = new LongArrayList(chunkSize);
             clEnqueueReadBuffer(cl.queue, bufFr, CL_TRUE,
                     off * Sizeof.cl_ulong,
                     chunkSize * Sizeof.cl_ulong,
-                    Pointer.to(chunk), 0, null, null);
-            frontierChunks.add(chunk);
+                    Pointer.to(chunk.buffer), 0, null, null);
+            frontierChunks.add(chunk.buffer);
             off += chunkSize;
             rem -= chunkSize;
         }

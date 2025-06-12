@@ -1,8 +1,11 @@
 // src/main/java/game/Game.java
 package game;
 
-import players.*;
-import ui.*;
+import players.HumanPlayer;
+import players.Player;
+import ui.BoardPanel;
+import ui.EvaluationPanel;
+import ui.OptionsPanel;
 
 import javax.swing.*;
 import java.awt.*;
@@ -15,21 +18,16 @@ public class Game extends JFrame {
     private BoardPanel boardPanel;
     private EvaluationPanel evalPanel;
     private OptionsPanel optionsPanel;
+    private boolean firstMoveDone = false;
 
     public Game() {
-        board      = new Board();
-        playerX    = new HumanPlayer(Board.Player.X);
-        playerO    = new HumanPlayer(Board.Player.O);
+        board         = new Board();
+        playerX       = new HumanPlayer(Board.Player.X);
+        playerO       = new HumanPlayer(Board.Player.O);
         currentPlayer = playerX;
 
         initUI();
-
-        // At startup: enable board if human, or fire the NN immediately
-        boolean humanTurn = currentPlayer instanceof HumanPlayer;
-        boardPanel.setEnabled(humanTurn);
-        if (!humanTurn) {
-            SwingUtilities.invokeLater(() -> currentPlayer.makeMove(this));
-        }
+        updateTurnControls();  // decide if we auto‐step or wait for Next Move
     }
 
     private void initUI() {
@@ -39,9 +37,9 @@ public class Game extends JFrame {
         setLayout(new BorderLayout());
         getContentPane().setBackground(new Color(173, 216, 230));
 
-        evalPanel   = new EvaluationPanel();
-        boardPanel  = new BoardPanel(this);
-        optionsPanel= new OptionsPanel(this, boardPanel, evalPanel);
+        evalPanel    = new EvaluationPanel();
+        boardPanel   = new BoardPanel(this);
+        optionsPanel = new OptionsPanel(this, boardPanel, evalPanel);
 
         add(evalPanel,    BorderLayout.WEST);
         add(boardPanel,   BorderLayout.CENTER);
@@ -51,87 +49,94 @@ public class Game extends JFrame {
         setVisible(true);
     }
 
-    public Board getBoard() {
-        return board;
-    }
+    public Board getBoard()       { return board; }
+    public Player getPlayerX()    { return playerX; }
+    public Player getPlayerO()    { return playerO; }
+    public boolean isFirstMoveDone() { return firstMoveDone; }
 
     /**
-     * Called by both human clicks and NN moves.
+     * Called by both human clicks and AI moves.
      */
     public void applyMove(int x, int y, int z) {
+        boolean wasFirst = !firstMoveDone;
         try {
             board.play(x, y, z, currentPlayer.getSymbol());
         } catch (IllegalArgumentException e) {
-            // invalid click—ignore
-            return;
+            return;  // invalid move
         }
+        if (wasFirst) firstMoveDone = true;
 
         boardPanel.repaint();
-
-        // Check for end-of-game
-        Board.Result result = board.checkWin();
+        var result = board.checkWin();
         if (result.gameOver) {
-            if (result.winner == Board.Player.NONE) {
-                JOptionPane.showMessageDialog(this, "Draw!");
-            } else {
-                JOptionPane.showMessageDialog(this,
-                        "Player " + result.winner + " wins!");
-            }
+            String msg = result.winner == Board.Player.NONE
+                    ? "Draw!"
+                    : "Player " + result.winner + " wins!";
+            JOptionPane.showMessageDialog(this, msg);
 
-            // reset
-            board = new Board();
+            // reset everything
+            board         = new Board();
             boardPanel.repaint();
             currentPlayer = playerX;
+            firstMoveDone = false;
             optionsPanel.updateCurrentMoveLabel();
-            setPlayerX(new HumanPlayer(Board.Player.X));
-            setPlayerO(new HumanPlayer(Board.Player.O));
-
-            // re-enable/NN-play
-            boolean humanTurn2 = currentPlayer instanceof HumanPlayer;
-            boardPanel.setEnabled(humanTurn2);
-            if (!humanTurn2) {
-                SwingUtilities.invokeLater(() -> currentPlayer.makeMove(this));
-            }
+            updateTurnControls();
             return;
         }
 
-        // switch sides
-        currentPlayer = (currentPlayer == playerX) ? playerO : playerX;
+        // next turn
+        currentPlayer = (currentPlayer == playerX ? playerO : playerX);
         optionsPanel.updateCurrentMoveLabel();
+        updateTurnControls();
+    }
 
-        // enable board only for human; queue NN otherwise
-        boolean humanTurn2 = currentPlayer instanceof HumanPlayer;
-        boardPanel.setEnabled(humanTurn2);
-        if (!humanTurn2) {
+    /** Invoked by the Next Move button. */
+    public void stepAIMove() {
+        currentPlayer.makeMove(this);
+    }
+
+    /**
+     * Decides whether to auto‐step the AI or wait for Next Move.
+     */
+    private void updateTurnControls() {
+        boolean humanTurn = currentPlayer instanceof HumanPlayer;
+        boolean bothAI    = !(playerX instanceof HumanPlayer)
+                && !(playerO instanceof HumanPlayer);
+
+        // human may click only on human turns
+        boardPanel.setEnabled(humanTurn);
+
+        // enable Next Move if either:
+        //  • both players are AI, or
+        //  • it's the very first move and currentPlayer is AI
+        optionsPanel.updateControlButtons();
+
+        // If this is *not* the first move, *and* it's AI vs Human,
+        // auto‐step the AI immediately.
+        if (!humanTurn && !bothAI && firstMoveDone) {
             SwingUtilities.invokeLater(() -> currentPlayer.makeMove(this));
         }
     }
 
-    /** Swap in a new X-player and, if it’s X’s turn, trigger it immediately. */
     public void setPlayerX(Player p) {
         this.playerX = p;
         if (currentPlayer.getSymbol() == Board.Player.X) {
             currentPlayer = p;
             optionsPanel.updateCurrentMoveLabel();
-            boolean human = p instanceof HumanPlayer;
-            boardPanel.setEnabled(human);
-            if (!human) SwingUtilities.invokeLater(() -> p.makeMove(this));
         }
+        updateTurnControls();
     }
 
-    /** Swap in a new O-player and, if it’s O’s turn, trigger it immediately. */
     public void setPlayerO(Player p) {
         this.playerO = p;
         if (currentPlayer.getSymbol() == Board.Player.O) {
             currentPlayer = p;
             optionsPanel.updateCurrentMoveLabel();
-            boolean human = p instanceof HumanPlayer;
-            boardPanel.setEnabled(human);
-            if (!human) SwingUtilities.invokeLater(() -> p.makeMove(this));
         }
+        updateTurnControls();
     }
 
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> new Game());
+        SwingUtilities.invokeLater(Game::new);
     }
 }

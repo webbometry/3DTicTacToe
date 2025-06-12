@@ -15,6 +15,10 @@ public class Board {
         return x + y * 3 + z * 9;
     }
 
+    public boolean getCurrentSymbol() {
+        return false;
+    }
+
     public enum Player {
         X('x'),
         O('o'),

@@ -1,184 +1,114 @@
 package precomputing.minimax;
 
+import com.carrotsearch.hppc.LongArrayList;
+import com.carrotsearch.hppc.cursors.LongCursor;
 import support.CLContext;
+import org.jocl.Sizeof;
 
 import java.io.*;
-import java.nio.file.*;
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
-import java.util.Comparator;
-import java.util.List;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
+import java.nio.LongBuffer;
+import java.nio.channels.FileChannel;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 
 public class Main {
-    public static void main(String[] args) throws Exception {
-        //----------------------------------------
-        // 1) Directories on D:
-        //----------------------------------------
-        Path scratchRoot       = Paths.get("D:\\3dttt\\scratch");
-        Path frontierDir       = scratchRoot.resolve("frontier");
-        Path nextFrontierDir   = scratchRoot.resolve("frontier_next");
-        Path termDir           = Paths.get("D:\\3dttt\\terminals");
-        Files.createDirectories(frontierDir);
-        Files.createDirectories(termDir);
+    private static final int MAX_DEPTH = 27;
+    static final long RAM_BUDGET_BYTES = 40L * 1024 * 1024 * 1024; // 40 GB
+    static final int EXPANSION_FACTOR = 27;
+    static int MAX_BOARDS_PER_BATCH; // = (int) (RAM_BUDGET_BYTES / (Long.BYTES * (1 + EXPANSION_FACTOR)));
+    private static final long MAX_POSSIBLE_TERMS = 1_000_000_000L;
 
-        // Cleanup old frontier chunks
-        System.out.println("Cleaning old frontier chunks...");
-        if (Files.exists(frontierDir)) {
-            Files.walk(frontierDir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> p.toFile().delete());
-        }
-        // Cleanup old terminal chunks
-        System.out.println("Cleaning old terminal chunks...");
-        if (Files.exists(termDir)) {
-            Files.walk(termDir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> p.toFile().delete());
-        }
-        Files.createDirectories(frontierDir);
-        Files.createDirectories(termDir);
+    public static void main(String[] args) throws IOException {
+        try {
+            // 1) Initialize OpenCL context & expander
+            CLContext clContext = new CLContext("cl/expand_and_classify.cl");
+            // Determine the maximum boards-per-chunk from device limits
+            int maxBoards = (int) (clContext.maxAllocBytes / Sizeof.cl_ulong);
+            ExpandAndClassify expander = new ExpandAndClassify(clContext, maxBoards);
 
-        //----------------------------------------
-        // 2) OpenCL setup
-        //----------------------------------------
-        CLContext cl = new CLContext("cl/expand_and_classify.cl");
-        long perBoardBytes =  8L                // input
-                + 27L*8L            // frontier out
-                + 27L*8L            // termX out
-                + 27L*8L            // termO out
-                + 27L*8L            // termTie out
-                + 3L*8L;            // 3 counters
-        int maxBoards = (int)(cl.maxAllocBytes / perBoardBytes);
-        System.out.printf("Using batch size = %,d boards%n", maxBoards);
-        ExpandAndClassify exp = new ExpandAndClassify(cl, maxBoards);
+            // 2) Prepare terminals.bin
+            Path outFile = Paths.get("src/main/resources/MiniMax/terminals.bin");
+            outFile.getParent().toFile().mkdirs();
 
-        //----------------------------------------
-        // 3) Heartbeat
-        //----------------------------------------
-        ScheduledExecutorService hb = Executors.newSingleThreadScheduledExecutor();
-        AtomicInteger hbCount = new AtomicInteger();
-        DateTimeFormatter dtf = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-        hb.scheduleAtFixedRate(() -> {
-            System.out.printf("[%s] Still working… heartbeat #%d%n",
-                    LocalDateTime.now().format(dtf), hbCount.incrementAndGet());
-        }, 1, 1, TimeUnit.MINUTES);
+            FileChannel fc = new RandomAccessFile(new File("C:\\Users\\webbometric\\Documents\\GitHub\\3DTicTacToe\\src\\main\\resources\\MiniMax\\terminals.bin"), "rw").getChannel();
+            long maxBytes = MAX_POSSIBLE_TERMS * Long.BYTES;
+            fc.truncate(maxBytes);
+            LongBuffer lb = fc.map(FileChannel.MapMode.READ_WRITE, 0, fc.size()).asLongBuffer();
 
-        //----------------------------------------
-        // 4) Seed depth 0
-        //----------------------------------------
-        int depth = 0;
-        long totalBoards = 0, totalTerminals = 0;
-        long startNano = System.nanoTime();
+            // 3) Seed frontier with the empty board (bitboard = 0)
+            LongArrayList frontier = new LongArrayList();
+            frontier.add(0L);
 
-        // initial frontier file (one board: 0L)
-        Path first = frontierDir.resolve("d00_fc000.bin");
-        try (DataOutputStream w = new DataOutputStream(
-                new BufferedOutputStream(Files.newOutputStream(first)))) {
-            w.writeLong(0L);
-        }
+            // 4) Iterate depths 1 through MAX_DEPTH
+            for (int depth = 1; depth <= MAX_DEPTH; depth++) {
+                System.out.printf("=== Expanding depth %d (frontier size: %d) ===%n", depth, frontier.size());
 
-        //----------------------------------------
-        // 5) BFS loop
-        //----------------------------------------
-        while (true) {
-            depth++;
-            System.out.println("=== Depth " + depth + " ===");
+                int totalTerms = 0;
 
-            // prepare next frontier dir
-            if (Files.exists(nextFrontierDir))
-                Files.walk(nextFrontierDir)
-                        .sorted(Comparator.reverseOrder())
-                        .forEach(p -> p.toFile().delete());
-            Files.createDirectories(nextFrontierDir);
+                final long MAX_MAP_BYTES = (long)Integer.MAX_VALUE;
+                final int  MAX_MAP_LONGS = (int) (MAX_MAP_BYTES / (Long.BYTES * (EXPANSION_FACTOR - (depth - 1))));
 
-            // process each frontier chunk file
-            List<Path> chunks = Files.list(frontierDir)
-                    .filter(p -> p.toString().endsWith(".bin"))
-                    .sorted()
-                    .collect(Collectors.toList());
+                if (frontier.size() < MAX_MAP_LONGS) {
 
-            int fcIdx = 0;
-            for (Path fFile : chunks) {
-                // load the entire chunk into memory (≤ maxBoards)
-                long fileBytes = Files.size(fFile);
-                int count = (int)(fileBytes / Long.BYTES);
-                long[] batch = new long[count];
-                try (DataInputStream in = new DataInputStream(
-                        new BufferedInputStream(Files.newInputStream(fFile)))) {
-                    for (int i = 0; i < count; i++) {
-                        batch[i] = in.readLong();
-                    }
                 }
 
-                totalBoards += count;
-                var res = exp.run(batch, depth);
+                long nextFrontierSize = frontier.size() * (EXPANSION_FACTOR - (depth - 1));
+                Path nextFrontierPath = Paths.get("src/main/resources/MiniMax/next_frontier_depth" + depth + ".bin");
+                FileChannel nextFC = new RandomAccessFile(new File(nextFrontierPath.toString()), "rw").getChannel();
+                LongBuffer nextLB = nextFC.map(FileChannel.MapMode.READ_WRITE, 0, nextFrontierSize * Long.BYTES).asLongBuffer();
 
-                // write terminals **only** from depth 9 onward
-                if (depth >= 9) {
-                    Path termChunk = termDir.resolve(
-                            String.format("d%02d_fc%04d.bin", depth, fcIdx));
-                    try (DataOutputStream tw = new DataOutputStream(
-                            new BufferedOutputStream(Files.newOutputStream(termChunk)))) {
-                        for (long b : res.termX)   { tw.writeLong(b); tw.writeByte(+27); totalTerminals++; }
-                        for (long b : res.termO)   { tw.writeLong(b); tw.writeByte(-27); totalTerminals++; }
-                        for (long b : res.termTie) { tw.writeLong(b); tw.writeByte(  0); totalTerminals++; }
+                for (int batchStart = 0; batchStart < frontier.size(); batchStart += MAX_BOARDS_PER_BATCH) {
+                    int batchEnd = Math.min(batchStart + MAX_BOARDS_PER_BATCH, frontier.size());
+                    int batchLen = batchEnd - batchStart;
+                    LongArrayList batch = new LongArrayList(batchLen);
+                    batch.add(frontier.buffer, batchStart, batchEnd);
+
+                    // Expand & classify this batch
+                    ExpandAndClassify.Result res = expander.run(batch, depth);
+
+                    // Handle terminals as before (stream to disk)
+                    int batchTermCount = res.termX.size() + res.termO.size() + res.termTie.size();
+                    LongArrayList allBatchTerms = new LongArrayList(batchTermCount);
+                    int idx = 0;
+
+                    for (LongCursor b : res.termX)   allBatchTerms.set(idx++,b.value);
+                    for (LongCursor b : res.termO)   allBatchTerms.set(idx++,b.value);
+                    for (LongCursor b : res.termTie) allBatchTerms.set(idx++,b.value);
+                    if (batchTermCount > 0) {
+                        lb.put(allBatchTerms.buffer);
                     }
-                }
+                    totalTerms += batchTermCount;
 
-                // emit next-frontier chunks exactly as returned
-                int n = 0;
-                for (long[] fc : res.frontierChunks) {
-                    Path outF = nextFrontierDir.resolve(
-                            String.format("d%02d_fc%04d_%02d.bin", depth, fcIdx, n++));
-                    try (DataOutputStream fw = new DataOutputStream(
-                            new BufferedOutputStream(Files.newOutputStream(outF)))) {
-                        for (long nb : fc) fw.writeLong(nb);
+                    // Write non-terminals
+                    for (LongCursor c : res.frontierChunks) {
+                        LongArrayList chunk = LongArrayList.from(c.value);
+                        for (LongCursor lc : chunk) {
+                            nextLB.put(lc.value);
+                        }
                     }
-                }
 
-                fcIdx++;
+                }
+                System.out.printf("Depth %d: %d terminal boards%n", depth, totalTerms);
+
+                nextFC.close();
+
+                // Now, for the next loop, read the file back into batches for processing
+                LongArrayList nextFrontierList = new LongArrayList();
+                FileChannel readFC = new FileInputStream(nextFrontierPath.toFile()).getChannel();
+                LongBuffer readLB = readFC.map(FileChannel.MapMode.READ_ONLY, 0, readFC.size()).asLongBuffer();
+                while (readLB.hasRemaining()) {
+                    nextFrontierList.add(readLB.get());
+                }
+                frontier = nextFrontierList;
             }
 
-            // swap dirs
-            Files.walk(frontierDir)
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(p -> p.toFile().delete());
-            Files.createDirectories(frontierDir);
-            Files.list(nextFrontierDir).forEach(p -> {
-                try { Files.move(p, frontierDir.resolve(p.getFileName())); }
-                catch(IOException e){ throw new UncheckedIOException(e); }
-            });
+            fc.close();
 
-            // if no files left, done
-            if (Files.list(frontierDir).noneMatch(p -> p.toString().endsWith(".bin")))
-                break;
+            System.out.println("Done! All terminal positions written to " + outFile);
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.err.println("Failed during expansion or writing.");
         }
 
-        //----------------------------------------
-        // 6) Merge terminal chunks
-        //----------------------------------------
-        try (OutputStream finalOut = new BufferedOutputStream(
-                Files.newOutputStream(Paths.get("D:\\3dttt\\terminals.bin")))) {
-            Files.list(termDir)
-                    .filter(p -> p.toString().endsWith(".bin"))
-                    .sorted()
-                    .forEach(p -> {
-                        try (InputStream in = new BufferedInputStream(Files.newInputStream(p))) {
-                            in.transferTo(finalOut);
-                        } catch(IOException e){
-                            throw new UncheckedIOException(e);
-                        }
-                    });
-        }
-
-        hb.shutdownNow();
-        double secs = (System.nanoTime() - startNano) / 1e9;
-        System.out.printf(
-                "Done: processed %,d boards, wrote %,d terminals in %.3f s%n",
-                totalBoards, totalTerminals, secs
-        );
     }
 }
