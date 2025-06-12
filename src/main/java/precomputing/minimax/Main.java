@@ -45,13 +45,6 @@ public class Main {
 
                 int totalTerms = 0;
 
-                final long MAX_MAP_BYTES = (long)Integer.MAX_VALUE;
-                final int  MAX_MAP_LONGS = (int) (MAX_MAP_BYTES / (Long.BYTES * (EXPANSION_FACTOR - (depth - 1))));
-
-                if (frontier.size() < MAX_MAP_LONGS) {
-
-                }
-
                 long nextFrontierSize = frontier.size() * (EXPANSION_FACTOR - (depth - 1));
                 Path nextFrontierPath = Paths.get("src/main/resources/MiniMax/next_frontier_depth" + depth + ".bin");
                 FileChannel nextFC = new RandomAccessFile(new File(nextFrontierPath.toString()), "rw").getChannel();
