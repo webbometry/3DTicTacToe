@@ -4,12 +4,17 @@ import com.carrotsearch.hppc.LongArrayList;
 import com.carrotsearch.hppc.cursors.LongCursor;
 import support.CLContext;
 
-import java.io.IOException;
+import java.io.*;
+import java.nio.file.*;
+import java.util.*;
 
 public class GPUTimer {
     private static final int MAX_DEPTH = 27;
     private static final long RAM_BUDGET_BYTES = 40L * 1024 * 1024 * 1024; // 40 GB
     private static final int EXPANSION_FACTOR = 27;
+    private static final int MAX_FRONTIER_SIZE = 50_000_000; // Max boards in memory frontier
+    private static final int FRONTIER_SPLIT_THRESHOLD = 30_000_000; // When to start splitting
+    private static final String TEMP_DIR = "temp_frontiers";
 
     private final CLContext clContext;
     private final ExpandAndClassify expander;
@@ -35,120 +40,264 @@ public class GPUTimer {
         this.maxBoardsPerBatch = Math.min(gpuLimitedBatch, ramLimitedBatch);
         this.expander = new ExpandAndClassify(clContext, maxBoardsPerBatch);
 
+        // Create temp directory for frontier files
+        Files.createDirectories(Paths.get(TEMP_DIR));
+
         System.out.println("=== GPU Timer - Board Generation Performance Test ===");
         System.out.printf("GPU Memory Limit: %,d boards/batch%n", gpuLimitedBatch);
         System.out.printf("RAM Budget Limit: %,d boards/batch%n", ramLimitedBatch);
         System.out.printf("Batch Size: %,d boards%n", maxBoardsPerBatch);
+        System.out.printf("Max Frontier Size: %,d boards%n", MAX_FRONTIER_SIZE);
         System.out.printf("GPU Max Alloc: %.2f MB%n", clContext.maxAllocBytes / (1024.0 * 1024.0));
         System.out.println();
+    }
+
+    // Multi-frontier management
+    private static class MultiFrontier {
+        private final List<LongArrayList> memoryFrontiers;
+        private final List<String> diskFrontiers;
+        private long totalSize;
+
+        public MultiFrontier() {
+            this.memoryFrontiers = new ArrayList<>();
+            this.diskFrontiers = new ArrayList<>();
+            this.totalSize = 0;
+        }
+
+        public void addBoards(LongArrayList boards) throws IOException {
+            if (boards.isEmpty()) return;
+
+            // If we can fit in current memory frontier, do so
+            if (!memoryFrontiers.isEmpty()) {
+                LongArrayList current = memoryFrontiers.get(memoryFrontiers.size() - 1);
+                if (current.size() + boards.size() <= MAX_FRONTIER_SIZE) {
+                    for (int i = 0; i < boards.size(); i++) {
+                        current.add(boards.get(i));
+                    }
+                    totalSize += boards.size();
+                    return;
+                }
+            }
+
+            // If current memory frontier is too big, move it to disk
+            if (!memoryFrontiers.isEmpty()) {
+                LongArrayList current = memoryFrontiers.get(memoryFrontiers.size() - 1);
+                if (current.size() >= FRONTIER_SPLIT_THRESHOLD) {
+                    String filename = TEMP_DIR + "/frontier_" + System.currentTimeMillis() + ".dat";
+                    saveFrontierToDisk(current, filename);
+                    diskFrontiers.add(filename);
+                    memoryFrontiers.remove(memoryFrontiers.size() - 1);
+                    current.clear();
+                }
+            }
+
+            // Create new memory frontier
+            LongArrayList newFrontier = new LongArrayList(Math.min(MAX_FRONTIER_SIZE, boards.size()));
+            for (int i = 0; i < boards.size(); i++) {
+                newFrontier.add(boards.get(i));
+            }
+            memoryFrontiers.add(newFrontier);
+            totalSize += boards.size();
+        }
+
+        public long size() {
+            return totalSize;
+        }
+
+        public boolean isEmpty() {
+            return totalSize == 0;
+        }
+
+        public FrontierIterator iterator() {
+            return new FrontierIterator(this);
+        }
+
+        public void clear() {
+            // Clear memory frontiers
+            for (LongArrayList frontier : memoryFrontiers) {
+                frontier.clear();
+            }
+            memoryFrontiers.clear();
+
+            // Delete disk frontiers
+            for (String filename : diskFrontiers) {
+                try {
+                    Files.deleteIfExists(Paths.get(filename));
+                } catch (IOException e) {
+                    System.err.println("Warning: Could not delete " + filename);
+                }
+            }
+            diskFrontiers.clear();
+            totalSize = 0;
+        }
+
+        private void saveFrontierToDisk(LongArrayList frontier, String filename) throws IOException {
+            try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(
+                    new FileOutputStream(filename)))) {
+                dos.writeInt(frontier.size());
+                for (int i = 0; i < frontier.size(); i++) {
+                    dos.writeLong(frontier.get(i));
+                }
+            }
+            System.out.printf("│ 💾 Saved %,d boards to disk: %s%n", frontier.size(), filename);
+        }
+
+        private LongArrayList loadFrontierFromDisk(String filename) throws IOException {
+            try (DataInputStream dis = new DataInputStream(new BufferedInputStream(
+                    new FileInputStream(filename)))) {
+                int size = dis.readInt();
+                LongArrayList frontier = new LongArrayList(size);
+                for (int i = 0; i < size; i++) {
+                    frontier.add(dis.readLong());
+                }
+                return frontier;
+            }
+        }
+    }
+
+    private static class FrontierIterator {
+        private final MultiFrontier multiFrontier;
+        private int memoryIndex;
+        private int diskIndex;
+        private int positionInCurrent;
+        private LongArrayList currentMemoryFrontier;
+        private LongArrayList currentDiskFrontier;
+
+        public FrontierIterator(MultiFrontier multiFrontier) {
+            this.multiFrontier = multiFrontier;
+            this.memoryIndex = 0;
+            this.diskIndex = 0;
+            this.positionInCurrent = 0;
+            loadNextFrontier();
+        }
+
+        private void loadNextFrontier() {
+            // Try memory frontiers first
+            if (memoryIndex < multiFrontier.memoryFrontiers.size()) {
+                currentMemoryFrontier = multiFrontier.memoryFrontiers.get(memoryIndex);
+                currentDiskFrontier = null;
+                memoryIndex++;
+                positionInCurrent = 0;
+                return;
+            }
+
+            // Then disk frontiers
+            if (diskIndex < multiFrontier.diskFrontiers.size()) {
+                try {
+                    String filename = multiFrontier.diskFrontiers.get(diskIndex);
+                    currentDiskFrontier = multiFrontier.loadFrontierFromDisk(filename);
+                    currentMemoryFrontier = null;
+                    diskIndex++;
+                    positionInCurrent = 0;
+                    System.out.printf("│ 📀 Loaded %,d boards from disk%n", currentDiskFrontier.size());
+                } catch (IOException e) {
+                    System.err.println("Error loading frontier from disk: " + e.getMessage());
+                    currentDiskFrontier = null;
+                    currentMemoryFrontier = null;
+                }
+                return;
+            }
+
+            // No more frontiers
+            currentMemoryFrontier = null;
+            currentDiskFrontier = null;
+        }
+
+        public LongArrayList getNextChunk(int maxSize) {
+            LongArrayList chunk = new LongArrayList();
+
+            while (chunk.size() < maxSize && hasMore()) {
+                LongArrayList current = (currentMemoryFrontier != null) ? currentMemoryFrontier : currentDiskFrontier;
+                
+                if (current == null || positionInCurrent >= current.size()) {
+                    // Clean up current disk frontier
+                    if (currentDiskFrontier != null) {
+                        currentDiskFrontier.clear();
+                        currentDiskFrontier = null;
+                    }
+                    loadNextFrontier();
+                    continue;
+                }
+
+                int remaining = Math.min(maxSize - chunk.size(), current.size() - positionInCurrent);
+                for (int i = 0; i < remaining; i++) {
+                    chunk.add(current.get(positionInCurrent + i));
+                }
+                positionInCurrent += remaining;
+            }
+
+            return chunk;
+        }
+
+        public boolean hasMore() {
+            if (currentMemoryFrontier != null && positionInCurrent < currentMemoryFrontier.size()) {
+                return true;
+            }
+            if (currentDiskFrontier != null && positionInCurrent < currentDiskFrontier.size()) {
+                return true;
+            }
+            return memoryIndex < multiFrontier.memoryFrontiers.size() || 
+                   diskIndex < multiFrontier.diskFrontiers.size();
+        }
     }
 
     public void runTimingTest() {
         long testStartTime = System.currentTimeMillis();
 
-        // Start with empty board
-        LongArrayList frontier = new LongArrayList();
-        frontier.add(0L);
+        try {
+            // Start with empty board
+            MultiFrontier frontier = new MultiFrontier();
+            LongArrayList initialBoard = new LongArrayList();
+            initialBoard.add(0L);
+            frontier.addBoards(initialBoard);
 
-        for (int depth = 1; depth <= MAX_DEPTH; depth++) {
-            long depthStartTime = System.currentTimeMillis();
+            for (int depth = 1; depth <= MAX_DEPTH; depth++) {
+                long depthStartTime = System.currentTimeMillis();
 
-            System.out.printf("┌─ Depth %d ─ Frontier: %,d boards ─────────────────────────────┐%n", depth, frontier.size());
+                System.out.printf("┌─ Depth %d ─ Frontier: %,d boards ─────────────────────────────┐%n", depth, frontier.size());
 
-            LongArrayList nextFrontier = new LongArrayList();
-            long depthTerminals = 0;
-            long depthGPUTime = 0;
+                // Process depth using multi-frontier system
+                MultiFrontier nextFrontier = processDepthWithMultiFrontier(frontier, depth);
 
-            // Estimate memory usage for this depth
-            long estimatedNextFrontierSize = frontier.size() * EXPANSION_FACTOR;
-            long estimatedMemoryUsage = estimatedNextFrontierSize * Long.BYTES;
+                long depthEndTime = System.currentTimeMillis();
+                long depthTotalTime = depthEndTime - depthStartTime;
 
-            System.out.printf("│ Estimated next frontier: %,d boards (%.1f MB)%n",
-                estimatedNextFrontierSize, estimatedMemoryUsage / (1024.0 * 1024.0));
+                System.out.printf("│ COMPLETE: Next frontier size: %,d%n", nextFrontier.size());
+                System.out.println("└──────────────────────────────────────────────────────────────┘");
+                System.out.println();
 
-            int totalBatches = (frontier.size() + maxBoardsPerBatch - 1) / maxBoardsPerBatch;
+                // Clear the old frontier to free memory immediately
+                frontier.clear();
+                frontier = null;
+                System.gc();
 
-            // Process frontier in batches
-            for (int batchStart = 0; batchStart < frontier.size(); batchStart += maxBoardsPerBatch) {
-                int batchEnd = Math.min(batchStart + maxBoardsPerBatch, frontier.size());
-                int batchLen = batchEnd - batchStart;
-                int batchNum = (batchStart / maxBoardsPerBatch) + 1;
+                // Update frontier for next iteration
+                frontier = nextFrontier;
 
-                // Create batch
-                LongArrayList batch = new LongArrayList(batchLen);
-                for (int i = batchStart; i < batchEnd; i++) {
-                    batch.add(frontier.get(i));
-                }
-
-                // Time GPU expansion
-                long gpuStartTime = System.nanoTime();
-                ExpandAndClassify.Result result = expander.run(batch, depth);
-                long gpuEndTime = System.nanoTime();
-
-                long batchGPUTime = (gpuEndTime - gpuStartTime) / 1_000_000; // Convert to milliseconds
-                depthGPUTime += batchGPUTime;
-
-                // Count terminals
-                long batchTerminals = result.termX.size() + result.termO.size() + result.termTie.size();
-                depthTerminals += batchTerminals;
-
-                // Handle frontier expansion - collect all new frontier boards
-                int totalNewFrontierBoards = result.frontierChunks.size();
-                for (int i = 0; i < result.frontierChunks.size(); i++) {
-                    long board = result.frontierChunks.get(i);
-                    nextFrontier.add(board);
-                }
-
-                totalBoardsGenerated += batchTerminals + totalNewFrontierBoards;
-
-                System.out.printf("│ Batch %d/%d: %,d→%,d terminals, %,d frontier (%dms)%n",
-                    batchNum, totalBatches, batchLen, batchTerminals, totalNewFrontierBoards, batchGPUTime);
-
-                // Show terminal breakdown for significant findings or early batches
-                if (batchTerminals > 1000 || (batchTerminals > 0 && depth <= 10)) {
-                    System.out.printf("│   Terminals: X=%,d, O=%,d, Tie=%,d%n",
-                        result.termX.size(), result.termO.size(), result.termTie.size());
-                }
-
-                // Force garbage collection periodically
-                if (batchNum % 10 == 0) {
-                    System.gc();
+                // Break if no more boards to expand
+                if (frontier.isEmpty()) {
+                    System.out.printf("🏁 Game tree complete at depth %d - no more boards to expand%n%n", depth);
+                    break;
                 }
             }
 
-            long depthEndTime = System.currentTimeMillis();
-            long depthTotalTime = depthEndTime - depthStartTime;
-
-            totalTerminalBoards += depthTerminals;
-            totalGPUTime += depthGPUTime;
-            totalDepthTime += depthTotalTime;
-
-            System.out.printf("│ COMPLETE: %,d terminals found, %,d next frontier%n", depthTerminals, nextFrontier.size());
-            System.out.printf("│ Timing: GPU %,dms (%.1f%%), Total %,dms%n",
-                depthGPUTime, 
-                depthTotalTime > 0 ? (100.0 * depthGPUTime / depthTotalTime) : 0.0,
-                depthTotalTime);
-
-            // Debug warning if no terminals found at late depths
-            if (depthTerminals == 0 && depth >= 9) {
-                System.out.printf("│ ⚠️  WARNING: No terminals at depth %d - check win detection!%n", depth);
+            // Clean up final frontier
+            if (frontier != null) {
+                frontier.clear();
             }
 
-            System.out.println("└──────────────────────────────────────────────────────────────┘");
-            System.out.println();
-
-            // Clear the old frontier to free memory immediately
-            frontier.clear();
-            frontier = null;
-            System.gc();
-
-            // Update frontier for next iteration
-            frontier = nextFrontier;
-
-            // Break if no more boards to expand
-            if (frontier.isEmpty()) {
-                System.out.printf("🏁 Game tree complete at depth %d - no more boards to expand%n%n", depth);
-                break;
+        } catch (IOException e) {
+            System.err.println("❌ Error managing frontiers: " + e.getMessage());
+            e.printStackTrace();
+        } finally {
+            // Clean up temp directory
+            try {
+                Files.walk(Paths.get(TEMP_DIR))
+                     .sorted(Comparator.reverseOrder())
+                     .map(Path::toFile)
+                     .forEach(File::delete);
+            } catch (IOException e) {
+                System.err.println("Warning: Could not clean up temp directory");
             }
         }
 
@@ -156,6 +305,128 @@ public class GPUTimer {
         long totalTestTime = testEndTime - testStartTime;
 
         printSummary(totalTestTime);
+    }
+
+    private MultiFrontier processDepthWithMultiFrontier(MultiFrontier frontier, int depth) throws IOException {
+        // Calculate safe chunk size
+        long memoryPerBoard = Long.BYTES * EXPANSION_FACTOR;
+        int safeChunkSize = (int) Math.min(maxBoardsPerBatch, 
+            Math.min(FRONTIER_SPLIT_THRESHOLD / 2, RAM_BUDGET_BYTES / (memoryPerBoard * 8)));
+
+        MultiFrontier nextFrontier = new MultiFrontier();
+        long depthTerminals = 0;
+        long depthGPUTime = 0;
+
+        FrontierIterator iterator = frontier.iterator();
+        int chunkNum = 0;
+
+        while (iterator.hasMore()) {
+            chunkNum++;
+            
+            // Get next chunk of boards to process
+            LongArrayList chunk = iterator.getNextChunk(safeChunkSize);
+            if (chunk.isEmpty()) break;
+
+            System.out.printf("│ Processing chunk %d: %,d boards%n", chunkNum, chunk.size());
+
+            // Monitor memory
+            Runtime runtime = Runtime.getRuntime();
+            long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+            long maxMemory = runtime.maxMemory();
+            double memoryUsage = (double) usedMemory / maxMemory;
+
+            if (memoryUsage > 0.8) {
+                System.out.printf("│   Memory: %.1f%% - forcing GC%n", memoryUsage * 100);
+                System.gc();
+                Thread.yield();
+            }
+
+            // Process chunk in batches
+            LongArrayList chunkResults = new LongArrayList();
+            long chunkTerminals = 0;
+            long chunkGPUTime = 0;
+
+            int totalBatches = (chunk.size() + maxBoardsPerBatch - 1) / maxBoardsPerBatch;
+
+            for (int batchStart = 0; batchStart < chunk.size(); batchStart += maxBoardsPerBatch) {
+                int batchEnd = Math.min(batchStart + maxBoardsPerBatch, chunk.size());
+                int batchLen = batchEnd - batchStart;
+                int batchNum = (batchStart / maxBoardsPerBatch) + 1;
+
+                // Create batch
+                LongArrayList batch = new LongArrayList(batchLen);
+                for (int i = batchStart; i < batchEnd; i++) {
+                    batch.add(chunk.get(i));
+                }
+
+                // Time GPU expansion
+                long gpuStartTime = System.nanoTime();
+                ExpandAndClassify.Result result = expander.run(batch, depth);
+                long gpuEndTime = System.nanoTime();
+
+                long batchGPUTime = (gpuEndTime - gpuStartTime) / 1_000_000;
+                chunkGPUTime += batchGPUTime;
+
+                // Count terminals
+                long batchTerminals = result.termX.size() + result.termO.size() + result.termTie.size();
+                chunkTerminals += batchTerminals;
+
+                // Collect frontier boards from this batch
+                for (int i = 0; i < result.frontierChunks.size(); i++) {
+                    chunkResults.add(result.frontierChunks.get(i));
+                }
+
+                totalBoardsGenerated += batchTerminals + result.frontierChunks.size();
+
+                if (batchNum % 5 == 0 || totalBatches <= 10) {
+                    System.out.printf("│   Batch %d/%d: %,d→%,d terminals, %,d frontier (%dms)%n",
+                        batchNum, totalBatches, batchLen, batchTerminals, result.frontierChunks.size(), batchGPUTime);
+                }
+
+                // Clear batch immediately
+                batch.clear();
+                batch = null;
+
+                // Add results to next frontier in smaller chunks to avoid memory issues
+                if (chunkResults.size() > FRONTIER_SPLIT_THRESHOLD / 4) {
+                    nextFrontier.addBoards(chunkResults);
+                    chunkResults.clear();
+                    chunkResults = new LongArrayList();
+                }
+            }
+
+            // Add remaining results
+            if (!chunkResults.isEmpty()) {
+                nextFrontier.addBoards(chunkResults);
+                chunkResults.clear();
+            }
+
+            depthTerminals += chunkTerminals;
+            depthGPUTime += chunkGPUTime;
+
+            System.out.printf("│ Chunk %d complete: %,d terminals, next frontier: %,d%n",
+                chunkNum, chunkTerminals, nextFrontier.size());
+
+            // Clear chunk
+            chunk.clear();
+            chunk = null;
+
+            // Force GC every few chunks
+            if (chunkNum % 3 == 0) {
+                System.gc();
+            }
+        }
+
+        totalTerminalBoards += depthTerminals;
+        totalGPUTime += depthGPUTime;
+
+        System.out.printf("│ Depth Summary: %,d terminals, %,d next frontier%n", depthTerminals, nextFrontier.size());
+
+        if (depthTerminals == 0 && depth >= 9) {
+            System.out.printf("│ ⚠️  WARNING: No terminals at depth %d - check win detection!%n", depth);
+        }
+
+        return nextFrontier;
     }
 
     private void printSummary(long totalTestTime) {
@@ -182,7 +453,6 @@ public class GPUTimer {
                 (totalBoardsGenerated * 1000.0) / totalTestTime);
         }
 
-        // Add warning if no terminals found
         if (totalTerminalBoards == 0) {
             System.out.println("├─────────────────────────────────────────────────────────────────┤");
             System.out.println("│ ⚠️  CRITICAL WARNING: NO TERMINAL BOARDS FOUND!");
