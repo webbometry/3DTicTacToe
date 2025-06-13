@@ -15,6 +15,7 @@ public class GPUTimer {
     private static final int MAX_FRONTIER_SIZE = 50_000_000; // Max boards in memory frontier
     private static final int FRONTIER_SPLIT_THRESHOLD = 30_000_000; // When to start splitting
     private static final String TEMP_DIR = "temp_frontiers";
+    private static final String OUTPUT_DIR = "C:\\Users\\webbometric\\Documents\\GitHub\\3DTicTacToe\\src\\main\\resources\\MiniMax";
 
     private final CLContext clContext;
     private final ExpandAndClassify expander;
@@ -42,6 +43,8 @@ public class GPUTimer {
 
         // Create temp directory for frontier files
         Files.createDirectories(Paths.get(TEMP_DIR));
+        // Create output directory for terminals
+        Files.createDirectories(Paths.get(OUTPUT_DIR));
 
         System.out.println("=== GPU Timer - Board Generation Performance Test ===");
         System.out.printf("GPU Memory Limit: %,d boards/batch%n", gpuLimitedBatch);
@@ -49,6 +52,7 @@ public class GPUTimer {
         System.out.printf("Batch Size: %,d boards%n", maxBoardsPerBatch);
         System.out.printf("Max Frontier Size: %,d boards%n", MAX_FRONTIER_SIZE);
         System.out.printf("GPU Max Alloc: %.2f MB%n", clContext.maxAllocBytes / (1024.0 * 1024.0));
+        System.out.printf("Output Directory: %s%n", OUTPUT_DIR);
         System.out.println();
     }
 
@@ -56,11 +60,13 @@ public class GPUTimer {
     private static class MultiFrontier {
         private final List<LongArrayList> memoryFrontiers;
         private final List<String> diskFrontiers;
+        private final Set<String> processedFiles; // Track files that have been fully consumed
         private long totalSize;
 
         public MultiFrontier() {
             this.memoryFrontiers = new ArrayList<>();
             this.diskFrontiers = new ArrayList<>();
+            this.processedFiles = new HashSet<>();
             this.totalSize = 0;
         }
 
@@ -128,7 +134,26 @@ public class GPUTimer {
                 }
             }
             diskFrontiers.clear();
+            processedFiles.clear();
             totalSize = 0;
+        }
+
+        public void cleanupProcessedFiles() {
+            // Only delete files that have been marked as processed
+            List<String> toRemove = new ArrayList<>();
+            for (String filename : processedFiles) {
+                try {
+                    Files.deleteIfExists(Paths.get(filename));
+                    toRemove.add(filename);
+                } catch (IOException e) {
+                    // Ignore deletion errors
+                }
+            }
+            processedFiles.removeAll(toRemove);
+        }
+
+        private void markFileAsProcessed(String filename) {
+            processedFiles.add(filename);
         }
 
         private void saveFrontierToDisk(LongArrayList frontier, String filename) throws IOException {
@@ -162,12 +187,14 @@ public class GPUTimer {
         private int positionInCurrent;
         private LongArrayList currentMemoryFrontier;
         private LongArrayList currentDiskFrontier;
+        private String currentDiskFile;
 
         public FrontierIterator(MultiFrontier multiFrontier) {
             this.multiFrontier = multiFrontier;
             this.memoryIndex = 0;
             this.diskIndex = 0;
             this.positionInCurrent = 0;
+            this.currentDiskFile = null;
             loadNextFrontier();
         }
 
@@ -176,6 +203,7 @@ public class GPUTimer {
             if (memoryIndex < multiFrontier.memoryFrontiers.size()) {
                 currentMemoryFrontier = multiFrontier.memoryFrontiers.get(memoryIndex);
                 currentDiskFrontier = null;
+                currentDiskFile = null;
                 memoryIndex++;
                 positionInCurrent = 0;
                 return;
@@ -187,6 +215,7 @@ public class GPUTimer {
                     String filename = multiFrontier.diskFrontiers.get(diskIndex);
                     currentDiskFrontier = multiFrontier.loadFrontierFromDisk(filename);
                     currentMemoryFrontier = null;
+                    currentDiskFile = filename;
                     diskIndex++;
                     positionInCurrent = 0;
                     System.out.printf("│ 📀 Loaded %,d boards from disk%n", currentDiskFrontier.size());
@@ -194,6 +223,7 @@ public class GPUTimer {
                     System.err.println("Error loading frontier from disk: " + e.getMessage());
                     currentDiskFrontier = null;
                     currentMemoryFrontier = null;
+                    currentDiskFile = null;
                 }
                 return;
             }
@@ -201,6 +231,7 @@ public class GPUTimer {
             // No more frontiers
             currentMemoryFrontier = null;
             currentDiskFrontier = null;
+            currentDiskFile = null;
         }
 
         public LongArrayList getNextChunk(int maxSize) {
@@ -210,10 +241,12 @@ public class GPUTimer {
                 LongArrayList current = (currentMemoryFrontier != null) ? currentMemoryFrontier : currentDiskFrontier;
                 
                 if (current == null || positionInCurrent >= current.size()) {
-                    // Clean up current disk frontier
-                    if (currentDiskFrontier != null) {
+                    // Mark current disk file as fully processed before cleaning up
+                    if (currentDiskFrontier != null && currentDiskFile != null) {
+                        multiFrontier.markFileAsProcessed(currentDiskFile);
                         currentDiskFrontier.clear();
                         currentDiskFrontier = null;
+                        currentDiskFile = null;
                     }
                     loadNextFrontier();
                     continue;
@@ -238,6 +271,17 @@ public class GPUTimer {
             }
             return memoryIndex < multiFrontier.memoryFrontiers.size() || 
                    diskIndex < multiFrontier.diskFrontiers.size();
+        }
+    }
+
+    private void saveTerminalsToFile(LongArrayList terminals, String filename) throws IOException {
+        if (terminals.isEmpty()) return;
+        
+        try (DataOutputStream dos = new DataOutputStream(new BufferedOutputStream(
+                new FileOutputStream(filename, true)))) { // append mode
+            for (int i = 0; i < terminals.size(); i++) {
+                dos.writeLong(terminals.get(i));
+            }
         }
     }
 
@@ -313,9 +357,22 @@ public class GPUTimer {
         int safeChunkSize = (int) Math.min(maxBoardsPerBatch, 
             Math.min(FRONTIER_SPLIT_THRESHOLD / 2, RAM_BUDGET_BYTES / (memoryPerBoard * 8)));
 
+        // Calculate total chunks for progress tracking
+        int totalChunks = (int) ((frontier.size() + safeChunkSize - 1) / safeChunkSize);
+
         MultiFrontier nextFrontier = new MultiFrontier();
         long depthTerminals = 0;
         long depthGPUTime = 0;
+
+        // Initialize terminal files for this depth
+        String termXFile = OUTPUT_DIR + "/terminals_depth" + depth + "_X.dat";
+        String termOFile = OUTPUT_DIR + "/terminals_depth" + depth + "_O.dat";
+        String termTieFile = OUTPUT_DIR + "/terminals_depth" + depth + "_TIE.dat";
+
+        // Clear existing files
+        Files.deleteIfExists(Paths.get(termXFile));
+        Files.deleteIfExists(Paths.get(termOFile));
+        Files.deleteIfExists(Paths.get(termTieFile));
 
         FrontierIterator iterator = frontier.iterator();
         int chunkNum = 0;
@@ -327,7 +384,7 @@ public class GPUTimer {
             LongArrayList chunk = iterator.getNextChunk(safeChunkSize);
             if (chunk.isEmpty()) break;
 
-            System.out.printf("│ Processing chunk %d: %,d boards%n", chunkNum, chunk.size());
+            System.out.printf("│ Processing chunk %d/%d: %,d boards%n", chunkNum, totalChunks, chunk.size());
 
             // Monitor memory
             Runtime runtime = Runtime.getRuntime();
@@ -367,9 +424,14 @@ public class GPUTimer {
                 long batchGPUTime = (gpuEndTime - gpuStartTime) / 1_000_000;
                 chunkGPUTime += batchGPUTime;
 
-                // Count terminals
+                // Count terminals and save to files
                 long batchTerminals = result.termX.size() + result.termO.size() + result.termTie.size();
                 chunkTerminals += batchTerminals;
+
+                // Save terminals to files
+                saveTerminalsToFile(result.termX, termXFile);
+                saveTerminalsToFile(result.termO, termOFile);
+                saveTerminalsToFile(result.termTie, termTieFile);
 
                 // Collect frontier boards from this batch
                 for (int i = 0; i < result.frontierChunks.size(); i++) {
@@ -404,16 +466,17 @@ public class GPUTimer {
             depthTerminals += chunkTerminals;
             depthGPUTime += chunkGPUTime;
 
-            System.out.printf("│ Chunk %d complete: %,d terminals, next frontier: %,d%n",
-                chunkNum, chunkTerminals, nextFrontier.size());
+            System.out.printf("│ Chunk %d/%d complete: %,d terminals, next frontier: %,d%n",
+                chunkNum, totalChunks, chunkTerminals, nextFrontier.size());
 
             // Clear chunk
             chunk.clear();
             chunk = null;
 
-            // Force GC every few chunks
+            // Force GC every few chunks and clean up processed temp frontiers
             if (chunkNum % 3 == 0) {
                 System.gc();
+                frontier.cleanupProcessedFiles(); // Only delete files that have been fully consumed
             }
         }
 
@@ -421,6 +484,7 @@ public class GPUTimer {
         totalGPUTime += depthGPUTime;
 
         System.out.printf("│ Depth Summary: %,d terminals, %,d next frontier%n", depthTerminals, nextFrontier.size());
+        System.out.printf("│ Terminal files saved to: %s%n", OUTPUT_DIR);
 
         if (depthTerminals == 0 && depth >= 9) {
             System.out.printf("│ ⚠️  WARNING: No terminals at depth %d - check win detection!%n", depth);
@@ -442,6 +506,7 @@ public class GPUTimer {
             totalBoardsGenerated - totalTerminalBoards,
             totalBoardsGenerated > 0 ? (100.0 * (totalBoardsGenerated - totalTerminalBoards) / totalBoardsGenerated) : 0.0);
         System.out.println("├─────────────────────────────────────────────────────────────────┤");
+        System.out.printf("│ Terminal files saved to: %s%n", OUTPUT_DIR);
         
         if (totalGPUTime > 0) {
             System.out.printf("│ GPU Throughput:     %,.0f boards/second%n", 
